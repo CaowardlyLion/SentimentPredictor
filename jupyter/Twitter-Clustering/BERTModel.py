@@ -13,14 +13,18 @@ import pandas as pd
 from datetime import datetime
 
 class Model:
-    global OUTPUT_DIR = '~/Twitter-Clustering/output'
-    global USE_BUCKET = True
-    global DO_DELETE = False
-    global USE_BUCKET = False
-    global BERT_MODEL_HUB = "https://tfhub.dev/google/bert_cased_L-12_H-768_A-12/1"
-
-
-    tf.gfile.MakeDirs(OUTPUT_DIR)
+    
+    OUTPUT_DIR = '~/Twitter-Clustering/output'
+    USE_BUCKET = True
+    DO_DELETE = False
+    USE_BUCKET = False
+    BERT_MODEL_HUB = "https://tfhub.dev/google/bert_cased_L-12_H-768_A-12/1"
+    BATCH_SIZE = 32
+    LEARNING_RATE = 2e-5
+    NUM_TRAIN_EPOCHS = 10.0
+    WARMUP_PROPORTION = 0.1
+    SAVE_CHECKPOINTS_STEPS = 500
+    SAVE_SUMMARY_STEPS = 100
 
     df = pd.read_csv('training.csv', encoding='latin-1')
     df = df.drop(df.columns[[1,2,3,4]], axis=1)
@@ -33,28 +37,23 @@ class Model:
     DATA_COLUMN = 'text'
     LABEL_COLUMN = 'label'
     label_list = [0, 4]
-
+    
     # train_InputExamples = train.apply(lambda x: bert.run_classifier.InputExample(guid = None, text_a = x[DATA_COLUMN], text_b = None, label = x[LABEL_COLUMN]), axis = 1)
     # test_InputExamples = test.apply(lambda x: bert.run_classifier.InputExample(guid = None, text_a = x[DATA_COLUMN], text_b = None, label = x[LABEL_COLUMN]), axis = 1)
 
-    def create_tokenizer_from_hub_module():
+    def create_tokenizer_from_hub_module(self):
         with tf.Graph().as_default():
-            bert_module = hub.Module(BERT_MODEL_HUB)
+            bert_module = hub.Module(self.BERT_MODEL_HUB)
             tokenization_info = bert_module(signature = "tokenization_info", as_dict = True)
             with tf.Session() as sess:
                 vocab_file, do_lower_case = sess.run([tokenization_info["vocab_file"], tokenization_info["do_lower_case"]])
 
         return bert.tokenization.FullTokenizer(vocab_file = vocab_file, do_lower_case = do_lower_case)
 
-    tokenizer = create_tokenizer_from_hub_module()
 
     MAX_SEQ_LENGTH = 128
 
-    label_list = [0, 4]
-    MAX_SEQ_LENGTH = 128
-
-
-    def model_fn_builder(num_labels, learning_rate, num_train_steps, num_warmup_steps):
+    def model_fn_builder(self, num_labels, learning_rate, num_train_steps, num_warmup_steps):
         def model_fn(features, labels, mode, params):
             input_ids = features["input_ids"]
             input_mask = features["input_mask"]
@@ -62,7 +61,7 @@ class Model:
             label_ids = features["label_ids"]
             is_predicting = (mode == tf.estimator.ModeKeys.PREDICT)
             if not is_predicting:
-                (loss, predicted_labels, log_probs) = create_model( is_predicting, input_ids, input_mask, segment_ids, label_ids, num_labels)
+                (loss, predicted_labels, log_probs) = self.create_model( is_predicting, input_ids, input_mask, segment_ids, label_ids, num_labels)
 
                 train_op = bert.optimization.create_optimizer(
                 loss, learning_rate, num_train_steps, num_warmup_steps, use_tpu=False)
@@ -96,16 +95,40 @@ class Model:
                 else:
                     return tf.estimator.EstimatorSpec(mode=mode, loss=loss, eval_metric_ops=eval_metrics)
             else:
-                (predicted_labels, log_probs) = create_model(is_predicting, input_ids, input_mask, segment_ids, label_ids, num_labels)
+                (predicted_labels, log_probs) = self.create_model(is_predicting, input_ids, input_mask, segment_ids, label_ids, num_labels)
                 predictions = {
                     'probabilities': log_probs,
                     'labels': predicted_labels
                 }
                 return tf.estimator.EstimatorSpec(mode, predictions=predictions)
         return model_fn
-
-    def create_model(is_predicting, input_ids, input_mask, segment_ids, labels, num_labels):
-        bert_module = hub.Module(BERT_MODEL_HUB, trainable = True)
+    
+    def __init__(self): 
+        self.train_InputExamples = self.train.apply(lambda x: bert.run_classifier.InputExample(guid = None, text_a = x[self.DATA_COLUMN], text_b = None, label = x[self.LABEL_COLUMN]), axis = 1)
+        self.test_InputExamples = self.test.apply(lambda x: bert.run_classifier.InputExample(guid = None, text_a = x[self.DATA_COLUMN], text_b = None, label = x[self.LABEL_COLUMN]), axis = 1)
+        self.tokenizer = self.create_tokenizer_from_hub_module()
+        self.train_features = bert.run_classifier.convert_examples_to_features(self.train_InputExamples, self.label_list, self.MAX_SEQ_LENGTH, self.tokenizer)
+        self.test_features = bert.run_classifier.convert_examples_to_features(self.test_InputExamples, self.label_list, self.MAX_SEQ_LENGTH, self.tokenizer)
+        self.num_train_steps = int(len(self.train_features) / self.BATCH_SIZE * self.NUM_TRAIN_EPOCHS)
+        self.num_warmup_steps = int(self.num_train_steps * self.WARMUP_PROPORTION)
+        self.model_fn = self.model_fn_builder(
+            num_labels=len(Model.label_list),
+            learning_rate=self.LEARNING_RATE,
+            num_train_steps=self.num_train_steps,
+            num_warmup_steps=self.num_warmup_steps)
+        self.run_config = tf.estimator.RunConfig(
+            model_dir=self.OUTPUT_DIR,
+            save_summary_steps=self.SAVE_SUMMARY_STEPS,
+            save_checkpoints_steps=self.SAVE_CHECKPOINTS_STEPS)
+        self.estimator = tf.estimator.Estimator(
+            model_fn=self.model_fn,
+            config=self.run_config,
+            params={"batch_size": self.BATCH_SIZE})   
+        tf.gfile.MakeDirs(self.OUTPUT_DIR)
+        
+    
+    def create_model(self, is_predicting, input_ids, input_mask, segment_ids, labels, num_labels):
+        bert_module = hub.Module(self.BERT_MODEL_HUB, trainable = True)
         bert_inputs = dict(input_ids = input_ids, input_mask = input_mask, segment_ids = segment_ids)
         bert_outputs = bert_module(inputs=bert_inputs, signature="tokens", as_dict=True)
         output_layer = bert_outputs["pooled_output"]
@@ -125,35 +148,14 @@ class Model:
         loss = tf.reduce_mean(per_example_loss)
         return (loss, predicted_labels, log_probs)
 
-    BATCH_SIZE = 32
-    LEARNING_RATE = 2e-5
-    NUM_TRAIN_EPOCHS = 10.0
-    WARMUP_PROPORTION = 0.1
-    SAVE_CHECKPOINTS_STEPS = 500
-    SAVE_SUMMARY_STEPS = 100
-
-    run_config = tf.estimator.RunConfig(
-        model_dir=OUTPUT_DIR,
-        save_summary_steps=SAVE_SUMMARY_STEPS,
-        save_checkpoints_steps=SAVE_CHECKPOINTS_STEPS)
-
-
-    def create_tokenizer_from_hub_module():
-        with tf.Graph().as_default():
-            bert_module = hub.Module(BERT_MODEL_HUB)
-            tokenization_info = bert_module(signature = "tokenization_info", as_dict = True)
-            with tf.Session() as sess:
-                vocab_file, do_lower_case = sess.run([tokenization_info["vocab_file"], tokenization_info["do_lower_case"]])
-
-        return bert.tokenization.FullTokenizer(vocab_file = vocab_file, do_lower_case = do_lower_case)
 
 
 
-    def getPrediction(in_sentences, estimator):
-        labels = label_list
-        input_examples = [run_classifier.InputExample(guid="", text_a = x, text_b = None, label = 0) for x in in_sentences] # here, "" is just a dummy label
-        input_features = run_classifier.convert_examples_to_features(input_examples, label_list, MAX_SEQ_LENGTH, tokenizer)
-        predict_input_fn = run_classifier.input_fn_builder(features=input_features, seq_length=MAX_SEQ_LENGTH, is_training=False, drop_remainder=False)
-        predictions = estimator.predict(predict_input_fn)
-        return [(sentence, prediction['probabilities'], labels[prediction['labels']]) for sentence, prediction in zip(in_sentences, predictions)]
+    def getPrediction(self, in_sentences):
+        self.labels = self.label_list
+        self.input_examples = [run_classifier.InputExample(guid="", text_a = x, text_b = None, label = 0) for x in in_sentences] # here, "" is just a dummy label
+        self.input_features = run_classifier.convert_examples_to_features(self.input_examples, self.label_list, self.MAX_SEQ_LENGTH, self.tokenizer)
+        self.predict_input_fn = run_classifier.input_fn_builder(features=self.input_features, seq_length=self.MAX_SEQ_LENGTH, is_training=False, drop_remainder=False)
+        self.predictions = self.estimator.predict(self.predict_input_fn)
+        return [(sentence, prediction['probabilities'], self.labels[prediction['labels']]) for sentence, prediction in zip(in_sentences, self.predictions)]
 
